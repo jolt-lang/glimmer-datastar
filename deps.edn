@@ -1,0 +1,21 @@
+{:paths ["src"]
+
+ :deps {org.clojure/data.json
+        {:git/url "https://github.com/clojure/data.json.git"
+         :git/sha "1fce9070ee851f49a6c4ce6e1c0bb0db4d7594a0"}
+        ;; data.json reads java.time.format.DateTimeFormatter/ISO_INSTANT at
+        ;; namespace-load time, and java.time.* is this library (jolt-lang/time)
+        ;; rather than core, so jolt.time must load first — see the ns form.
+        jolt-lang/time
+        {:git/url "https://github.com/jolt-lang/time.git"
+         :git/sha "70dfb7981ef4ed70c5d142109d56a90edfb79cef"}
+        ;; reagent-style reactive cells: the SSE live-render loop subscribes to
+        ;; every ratom the page render derefs and re-renders when it changes.
+        jolt-lang/glimmer
+        {:git/url "https://github.com/jolt-lang/glimmer"
+         :git/sha "5d5bad588555f45e578867d2dd6ab4f6034d3780"}}
+
+ :aliases {:test {:extra-paths ["test"]
+                 :main-opts   ["-m" "jolt.datastar.core-test"]}}
+
+ :tasks {test "jolt -M:test"}}

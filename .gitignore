@@ -1,0 +1,6 @@
+.cpcache/
+.clj-kondo/
+.lsp/
+.jolt/
+.dirge/
+target/

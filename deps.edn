@@ -8,12 +8,12 @@
         ;; rather than core, so jolt.time must load first — see the ns form.
         jolt-lang/time
         {:git/url "https://github.com/jolt-lang/time.git"
-         :git/sha "70dfb7981ef4ed70c5d142109d56a90edfb79cef"}
+         :git/sha "33c5e9831c046cfcbe68bc0c9c33e92568eaebb1"}
         ;; reagent-style reactive cells: the SSE live-render loop subscribes to
         ;; every ratom the page render derefs and re-renders when it changes.
         jolt-lang/glimmer
         {:git/url "https://github.com/jolt-lang/glimmer"
-         :git/sha "5d5bad588555f45e578867d2dd6ab4f6034d3780"}}
+         :git/sha "55e38f0b21b8decbcf156f56d3c9dd25a875148b"}}
 
  :aliases {:test {:extra-paths ["test"]
                  :main-opts   ["-m" "jolt.datastar.core-test"]}}

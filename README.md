@@ -81,3 +81,7 @@ Any change to `state` now re-renders the open pages live:
 ```sh
 jolt -M:test
 ```
+
+## License
+
+MIT (see `LICENSE`).

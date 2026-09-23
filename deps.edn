@@ -13,7 +13,7 @@
         ;; every ratom the page render derefs and re-renders when it changes.
         jolt-lang/glimmer
         {:git/url "https://github.com/jolt-lang/glimmer"
-         :git/sha "55e38f0b21b8decbcf156f56d3c9dd25a875148b"}}
+         :git/sha "93758e82548daf75e357274558fc3e81bb754c9a"}}
 
  :aliases {:test {:extra-paths ["test"]
                  :main-opts   ["-m" "jolt.datastar.core-test"]}}

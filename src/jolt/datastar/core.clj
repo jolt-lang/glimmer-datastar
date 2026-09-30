@@ -214,6 +214,15 @@
        "').replace(/^&/, '?'), "
        "{openWhenHidden: false, retryMaxCount: Infinity})"))
 
+(def ^:private tab-id-expr
+  "JS for a fresh v4 UUID. crypto.randomUUID only exists in a secure context
+  (https or localhost), and calling it over plain http to another host throws,
+  which stops datastar from wiring up the rest of the page; getRandomValues
+  exists everywhere."
+  (str "(self.crypto.randomUUID ? self.crypto.randomUUID() : "
+       "'10000000-1000-4000-8000-100000000000'.replace(/[018]/g, c => "
+       "(c ^ self.crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> c / 4).toString(16)))"))
+
 (defn init-opts
   "HTML attribute map for the page's datastar root element: data-signals seeds
   the per-tab id (plus any :signals you want initialized, and the CSRF token
@@ -231,7 +240,7 @@
                            (map (fn [[k v]]
                                   (str (json/write-str (name k)) ": " (json/write-str v)))
                                 signals)
-                           [(str "'jolt.datastar.tab-id': self.crypto.randomUUID()"
+                           [(str "'jolt.datastar.tab-id': " tab-id-expr
                                  (when anti-forgery-token
                                    (str ", 'jolt.datastar.anti-forgery-token': "
                                         (json/write-str anti-forgery-token))))]))

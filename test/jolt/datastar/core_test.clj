@@ -99,6 +99,14 @@
     (is (str/includes? (:data-signals opts) "\"count\": 0"))
     (is (str/includes? (:data-signals opts) "\"name\": \"world\""))))
 
+(deftest init-opts-tab-id-works-outside-a-secure-context
+  ;; crypto.randomUUID only exists in a secure context (https or localhost);
+  ;; over plain http to a LAN address calling it throws, which stops datastar
+  ;; wiring up the rest of the page. getRandomValues exists everywhere.
+  (let [signals (:data-signals (ds/init-opts {:selector "#x"}))]
+    (is (str/includes? signals "self.crypto.randomUUID ? self.crypto.randomUUID() :"))
+    (is (str/includes? signals "getRandomValues"))))
+
 (defn -main [& _]
   (let [{:keys [fail error] :as result} (run-tests 'jolt.datastar.core-test)]
     (when (pos? (+ fail error))

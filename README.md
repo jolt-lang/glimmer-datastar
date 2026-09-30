@@ -48,7 +48,7 @@ that seed the per-tab signals and open the SSE stream:
 (datastar/init-opts {:selector "#greet"
                      :signals {:name "world"}
                      :anti-forgery-token csrf-token})
-;; => {:data-signals "{\"name\": \"world\", 'jolt.datastar.tab-id': self.crypto.randomUUID()}"
+;; => {:data-signals "{\"name\": \"world\", 'jolt.datastar.tab-id': <a fresh UUID>}"
 ;;     :data-init "@get(location.pathname + ...)"}
 ```
 

@@ -136,12 +136,20 @@
             (->> (walk/postwalk #(cond-> % (map? %)
                                    (update-keys (comp parse-signal-str name))))))))
 
+(defn- jolt-signal
+  "One of the signals init-opts declares. The client sends a dotted name back
+  nested, {\"jolt\": {\"datastar\": {...}}}, which parses to nested maps;
+  the flat :jolt.datastar/... key is still read for a client that sends it so."
+  [signals k]
+  (or (get signals (keyword "jolt.datastar" (name k)))
+      (get-in signals [:jolt :datastar k])))
+
 (defn- merge-signals
   "Parse datastar signals into the request and lift the tab id + CSRF token."
   [request]
   (let [signals    (parse-signals request)
-        tab-id     (some-> (:jolt.datastar/tab-id signals) parse-uuid)
-        csrf-token (:jolt.datastar/anti-forgery-token signals)]
+        tab-id     (some-> (jolt-signal signals :tab-id) str parse-uuid)
+        csrf-token (jolt-signal signals :anti-forgery-token)]
     (cond-> request
       signals (assoc :jolt.datastar/signals signals)
       tab-id  (assoc :jolt.datastar/tab-id tab-id)
@@ -157,7 +165,8 @@
 (defn- signal-name-part
   "The wire name of one keyword (or value): `:foo/bar` -> \"foo_bar\",
   `:jolt.datastar/tab-id` -> \"jolt.datastar.tab-id\" (dotted namespaces keep
-  dots, since dots mean nesting on the client and the parse side is symmetric)."
+  dots, since dots mean nesting on the client: a path in an attribute name,
+  nested objects in JSON, see signals-json)."
   [x]
   (if (keyword? x)
     (do
@@ -182,10 +191,27 @@
     (signal-name-part k)
     (str k)))
 
-(defn signals-json
-  "Signals map -> JSON string with wire signal names."
+(defn- merge-deep [a b]
+  (if (and (map? a) (map? b)) (merge-with merge-deep a b) b))
+
+(defn- wire-tree
+  "Signals keyed by wire name, with a dotted name as nested maps: the client
+  drops a JSON key that has a dot in it, leaving an empty object where the
+  value should be."
   [signals]
-  (json/write-str signals :key-fn key-json))
+  (reduce-kv (fn [m k v]
+               (let [v (if (map? v) (wire-tree v) v)]
+                 (update-in m (str/split (key-json k) #"\.") merge-deep v)))
+             {}
+             signals))
+
+(defn signals-json
+  "Signals map -> JSON string with wire signal names, a dotted name nested:
+  {:jolt.datastar/tab-id x} is {\"jolt\": {\"datastar\": {\"tab-id\": x}}}.
+  It comes back from the client nested the same way, so it parses to nested
+  maps rather than to the dotted keyword."
+  [signals]
+  (json/write-str (wire-tree signals)))
 
 (defn patch-signals
   "Ring response patching the client's signals. The datastar v1.0 client
@@ -201,10 +227,15 @@
 (def ^:private sse-param "datastar-sse")
 
 (defn- sse-open-expr
-  "The @get expression that opens the SSE stream for the current page. selector
-  names the element the server patches (optional; default body)."
+  "The expression that opens the SSE stream for the current page. selector
+  names the element the server patches (optional; default body).
+
+  The @get waits for a microtask: datastar applies an element's attributes in
+  the order they're written, and hiccup writes them sorted, data-init before
+  data-signals, so a @get run at once would go out before the signals it
+  should carry, the tab id among them, were set."
   [{:keys [selector]}]
-  (str "@get("
+  (str "queueMicrotask(() => @get("
        "location.pathname + "
        "(location.search + '&" sse-param "=true"
        (when selector
@@ -212,7 +243,7 @@
                                         (str/replace "#" "%23")
                                         (str/replace " " "%20"))))
        "').replace(/^&/, '?'), "
-       "{openWhenHidden: false, retryMaxCount: Infinity})"))
+       "{openWhenHidden: false, retryMaxCount: Infinity}))"))
 
 (def ^:private tab-id-expr
   "JS for a fresh v4 UUID. crypto.randomUUID only exists in a secure context
@@ -240,10 +271,12 @@
                            (map (fn [[k v]]
                                   (str (json/write-str (name k)) ": " (json/write-str v)))
                                 signals)
-                           [(str "'jolt.datastar.tab-id': " tab-id-expr
+                           ;; nested, as the client drops a dotted key
+                           [(str "'jolt': {'datastar': {'tab-id': " tab-id-expr
                                  (when anti-forgery-token
-                                   (str ", 'jolt.datastar.anti-forgery-token': "
-                                        (json/write-str anti-forgery-token))))]))
+                                   (str ", 'anti-forgery-token': "
+                                        (json/write-str anti-forgery-token)))
+                                 "}}")]))
                 "}")
            :data-init              (sse-open-expr {:selector selector})
            "data-on:online__window" (sse-open-expr {:selector selector})})))

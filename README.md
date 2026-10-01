@@ -48,7 +48,7 @@ that seed the per-tab signals and open the SSE stream:
 (datastar/init-opts {:selector "#greet"
                      :signals {:name "world"}
                      :anti-forgery-token csrf-token})
-;; => {:data-signals "{\"name\": \"world\", 'jolt.datastar.tab-id': <a fresh UUID>}"
+;; => {:data-signals "{\"name\": \"world\", 'jolt': {'datastar': {'tab-id': <a fresh UUID>, 'anti-forgery-token': \"...\"}}}"
 ;;     :data-init "@get(location.pathname + ...)"}
 ```
 
@@ -73,7 +73,10 @@ Any change to `state` now re-renders the open pages live:
 - `patch-elements-event`: builds a `datastar-patch-elements` SSE event.
 - `patch-signals`: a ring response that patches the client's signals.
 - `signal-name` and `signals-json`: convert keywords and signal maps to the wire
-  format.
+  format. `:foo/bar` is `foo_bar`. A dotted namespace is a path on the client,
+  so `signals-json` writes `:a.b/c` as `{"a": {"b": {"c": ...}}}`, since the
+  datastar client drops a JSON key with a dot in it, and the client sends it
+  back nested the same way, which parses to `{:a {:b {:c ...}}}`.
 - `wrap-signals`: parse signals only, without the SSE handling.
 
 ## Running the tests

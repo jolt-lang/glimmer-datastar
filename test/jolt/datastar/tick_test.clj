@@ -128,7 +128,9 @@
   (let [state   (ratom/atom "x")
         calls   (atom 0)
         board   (fn [] (swap! calls inc) [:div @state])
-        sched   (ds/scheduler {:tick-ms 10})
+        ;; one thread, for an exact count: two render threads can both miss
+        ;; the same component before either has stored it
+        sched   (ds/scheduler {:tick-ms 10 :render-threads 1})
         handler (ds/wrap-datastar (fn [_] {:status 200 :body (jolt.datastar.html/html [board])})
                                   {:scheduler sched})
         chs     (vec (repeatedly 10 #(:body (handler (sse-request)))))]
@@ -139,5 +141,30 @@
     (is (every? #(str/includes? (take-frame %) "<div>y</div>") chs)
         "pages served from the cache still update")
     (is (<= @calls 1))
+    (run! async/close! chs)
+    (ds/stop! sched)))
+
+(deftest cached-components-stay-correct-across-render-threads
+  (let [state   (ratom/atom 0)
+        cell    (fn [i] [:td i "/" @state])
+        sched   (ds/scheduler {:tick-ms 5 :render-threads 4})
+        handler (ds/wrap-datastar (fn [req]
+                                    {:status 200
+                                     :body (jolt.datastar.html/html
+                                            [:tr [:th (:viewer req)] (for [i (range 5)] [cell i])])})
+                                  {:scheduler sched})
+        chs     (vec (for [v (range 12)]
+                       (:body (handler (assoc (sse-request) :viewer v)))))]
+    (is (every? #(str/includes? (take-frame %) "<td>4/0</td>") chs))
+    (doseq [n (range 1 6)]
+      (reset! state n)
+      (is (every? (fn [[v ch]]
+                    (let [f (take-frame ch)
+                          ok (and (str/includes? f (str "<th>" v "</th>"))
+                                  (str/includes? f (str "<td>4/" n "</td>")))]
+                      (when-not ok (println "stream" v "state" n "got" (pr-str f)))
+                      ok))
+                  (map-indexed vector chs))
+          (str "every stream sees its own header and state " n)))
     (run! async/close! chs)
     (ds/stop! sched)))

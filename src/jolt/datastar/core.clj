@@ -331,7 +331,7 @@
 
 (def default-options
   {:tick-ms        15
-   :render-threads 1
+   :render-threads 2
    :sse-param      sse-param})
 
 (defn scheduler
@@ -371,7 +371,7 @@
   a params map of options:
     :tick-ms         minimum ms between renders of the open streams (default
                      15; :rate-limit-ms is read as an older name for it)
-    :render-threads  threads a tick's renders are spread over (default 1)
+    :render-threads  threads a tick's renders are spread over (default 2)
     :batch-fn        (fn [thunks]) applying each tick's tx! thunks (default:
                      each in order)
     :cache           component cache options, or false to render components

@@ -123,8 +123,9 @@ don't evict ones rendered every frame, and evicted by generation within
 - `wrap-datastar`: the middleware entry point. Options:
   - `:tick-ms` (default 15): the minimum time between render ticks.
     `:rate-limit-ms` is still read as its old name.
-  - `:render-threads` (default 1): how many threads a tick's renders are spread
-    over.
+  - `:render-threads` (default 2): how many threads a tick's renders are spread
+    over. On jolt, renders stopped scaling past two threads on a 4-core
+    machine (see `bench/README.md`).
   - `:batch-fn`: `(fn [thunks])` applying each tick's `tx!` thunks.
   - `:cache`: options for the component cache (`:max-chars`, `:doorkeeper`), or
     `false` for none.

@@ -110,14 +110,15 @@
 (defn scheduler
   "A render loop. Options:
     :tick-ms         minimum ms between ticks (default 15)
-    :render-threads  workers a tick's renders are spread over (default 1:
-                     render on the loop thread)
+    :render-threads  workers a tick's renders are spread over (default 2;
+                     1 renders on the loop thread). Two was the knee on a
+                     4-core machine, see bench/README.md
     :batch-fn        (fn [thunks]) running each tick's tx! thunks; default
                      runs them in order
     :cache           options for the component cache (see
                      jolt.datastar.cache/new-cache), or false for none
   The loop starts with the first stream or tx!."
-  [{:keys [tick-ms render-threads batch-fn cache] :or {tick-ms 15 render-threads 1}}]
+  [{:keys [tick-ms render-threads batch-fn cache] :or {tick-ms 15 render-threads 2}}]
   {:tick-ms        tick-ms
    :render-threads render-threads
    :batch-fn       batch-fn

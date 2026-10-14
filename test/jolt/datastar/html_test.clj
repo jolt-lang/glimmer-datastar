@@ -95,3 +95,41 @@
   (let [[calls row] (counting (fn [] [:br]))]
     (dotimes [_ 3] (h/html [row]))
     (is (= 3 @calls))))
+
+(defn- part-ids [[_ parts]] (mapv first parts))
+
+(deftest parts-are-the-components-with-ids
+  (let [row (fn [i] [:tr {:id (str "r" i)} [:td i]])
+        [s parts :as r] (h/html-parts [:table#t [row 1] [row 2]])]
+    (is (= "<table id=\"t\"><tr id=\"r1\"><td>1</td></tr><tr id=\"r2\"><td>2</td></tr></table>" s))
+    (is (= ["r1" "r2"] (part-ids r)))
+    (testing "each part is its HTML at its offset in the page"
+      (doseq [[_ html start] parts]
+        (is (= html (subs s start (+ start (count html)))))))
+    (testing "id shorthand on the tag counts too"
+      (is (= ["x"] (part-ids (h/html-parts [(fn [] [:div#x "a"])])))))))
+
+(deftest a-component-without-an-id-is-transparent
+  (let [row (fn [i] [:li {:id (str "i" i)} i])
+        rows (fn [] [:ul (for [i [1 2]] [row i])])]
+    (is (= ["i1" "i2"] (part-ids (h/html-parts [:div [rows]]))))
+    (testing "and stays so when it comes from the cache"
+      (let [c (cache/new-cache)
+            render #(binding [h/*cache* c] (h/html-parts [:div [rows]]))]
+        (dotimes [_ 2] (render))
+        (let [[s parts :as r] (render)]
+          (is (pos? (:hits (cache/stats c))))
+          (is (= ["i1" "i2"] (part-ids r)))
+          (doseq [[_ html start] parts]
+            (is (= html (subs s start (+ start (count html)))))))))))
+
+(deftest a-part-holds-its-own-components
+  (let [cell (fn [i] [:td {:id (str "c" i)} i])
+        row (fn [] [:tr#r (for [i [1 2]] [cell i])])]
+    (is (= ["r"] (part-ids (h/html-parts [:table [row]]))))))
+
+(deftest no-parts-inside-svg-or-math
+  ;; a patch is parsed as HTML, which would make an SVG child an HTML element
+  (let [dot (fn [i] [:circle {:id (str "d" i) :r i}])]
+    (is (= [] (part-ids (h/html-parts [:svg#s [dot 1]]))))
+    (is (= ["s"] (part-ids (h/html-parts [(fn [] [:svg#s [dot 1]])]))))))

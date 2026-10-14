@@ -35,6 +35,25 @@ The cache is the large win: the board renders once per change, not once per
 stream, and only its changed row misses. Threads scale to two and then
 flatten, so `:render-threads` defaults to 2.
 
+### Patches
+
+With the rows as components that have ids, a tick sends each stream only the
+row that changed, and a stream compares its page with the last one part by
+part. The cached board is the same vector of parts on every page that shows
+it, so the comparison skips it whole. Same benchmark on an M1 Max (10
+cores), whole frames against patches, run alternately:
+
+| render-threads | 1 | 2 | 4 | 8 |
+|---|---|---|---|---|
+| component cache, whole frames | 37.8 | 21.7 | 24.4 | 16.9 |
+| component cache, patches | 9.9 | 7.0 | 5.2 | 9.8 |
+| no component cache, whole frames | 395 | 213 | | |
+| no component cache, patches | 460 | 253 | | |
+
+Without the cache every row is a new string on every page, so it is compared
+in full, and an id'd component is rendered into a builder of its own; that
+costs about 15%. The cache is on by default.
+
 ## Render buffers: `render.clj`
 
 ```sh
@@ -66,22 +85,24 @@ from 0.44 µs down to 0.17 µs.
 ## On the wire: `wire.clj`
 
 ```sh
-jolt -Sdeps '{:paths ["src" "bench"] :deps {jolt-lang/ring-chez-adapter {:local/root "../ring-chez-adapter"}}}' bench/wire.clj
+jolt -Sdeps '{:paths ["src" "bench" "../ring-chez-adapter/src"]}' bench/wire.clj
 ```
 
 Octets per frame through ring-chez-adapter's streaming gzip, one row changing
 per frame:
 
-| rows | raw frame | gzip each frame | gzip stream, first | gzip stream, per change |
-|---|---|---|---|---|
-| 50 | 6503 | 899 | 920 | 92 |
-| 150 | 19553 | 2389 | 2430 | 330 |
-| 220 | 28862 | 3468 | 3501 | 455 |
-| 300 | 39503 | 4675 | 4709 | 4316 |
+| rows | raw frame | gzip each frame | gzip stream, first | gzip stream, per change | patch, raw | patch, gzip stream |
+|---|---|---|---|---|---|---|
+| 50 | 6503 | 899 | 920 | 92 | 255 | 28 |
+| 150 | 19553 | 2389 | 2430 | 330 | 257 | 28 |
+| 220 | 28862 | 3468 | 3501 | 455 | 257 | 28 |
+| 300 | 39503 | 4675 | 4709 | 4316 | 257 | 35 |
 
 While a frame fits deflate's 32 KB window, the stream matches it against the
 whole previous frame, and a changed frame costs about a tenth of compressing it
 on its own. Past 32 KB the stream can only match part of the previous frame,
 and the saving mostly goes. Hyperlith uses zstd with a 512 KB window for this
-reason. A zstd binding in the adapter would lift the limit. Until then, keep
-patched fragments under 32 KB, or patch more than one smaller target.
+reason. A patch (the last two columns) carries only the changed row, so its
+size doesn't grow with the page and the window stops mattering. Pages
+without id'd components still go whole; for those, keep patched fragments
+under 32 KB, or patch more than one smaller target.

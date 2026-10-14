@@ -293,26 +293,106 @@
 
 (defn patch-elements-event
   "SSE datastar-patch-elements event: replace the target element's content
-  (mode inner) with html, or the element itself (mode outer)."
+  (mode inner) with html, or the element itself (mode outer). With a nil
+  selector and mode outer, each top-level element in html replaces the
+  element with its id."
   ([html selector]
    (patch-elements-event html selector "inner"))
   ([html selector mode]
    (str "event: datastar-patch-elements\n"
         "id: " (hex-str (hash html)) "\n"
-        "data: selector " selector "\n"
+        (when selector (str "data: selector " selector "\n"))
         "data: mode " mode "\n"
         "data: namespace html\n"
         (elements-data-lines html)
         "data: useViewTransition false\n"
         "\n")))
 
+(defn- same-text?
+  "Whether a, from as to ae, holds the same text as b from bs to be."
+  [^String a as ae ^String b bs be]
+  (and (= (- ae as) (- be bs))
+       (or (= as ae) (= (subs a as ae) (subs b bs be)))))
+
+(defn- outer-gaps
+  "The text of page s around its groups: before the first, between each two,
+  after the last."
+  [^String s groups]
+  (loop [gs (seq groups) pos 0 gaps []]
+    (if gs
+      (let [[off _ ^String html] (first gs)]
+        (recur (next gs) (+ off (count html))
+               (conj gaps (if (= pos off) "" (subs s pos off)))))
+      (conj gaps (subs s pos)))))
+
+(defn- changed-in-group
+  "The changed parts' HTML of a group added to changed, comparing it with the
+  same group of the page before, or nil if the group changed around its
+  parts: other ids, other text between them."
+  [[_ parts ^String html] [_ pparts ^String phtml] changed]
+  (cond
+    ;; the vector the page had before: same ids, HTML and text between them
+    (identical? parts pparts) changed
+    (not= (count parts) (count pparts)) nil
+    :else
+    (loop [j 0 pos 0 ppos 0 changed changed]
+      (if (= j (count parts))
+        (when (same-text? html pos (count html) phtml ppos (count phtml))
+          changed)
+        (let [[id h st] (nth parts j)
+              [pid ph pst] (nth pparts j)]
+          (when (and (= id pid) (same-text? html pos st phtml ppos pst))
+            (recur (inc j) (+ st (count h)) (+ pst (count ph))
+                   (if (= h ph) changed (conj changed h)))))))))
+
+(defn- changed-parts
+  "The HTML of the parts of a page that differ from the page before, given
+  each page's groups and outer gaps, or nil when the page changed around its
+  parts: a part added, ids in another order, other text between them."
+  [prev groups gaps]
+  (when (and (= (count groups) (count (:groups prev)))
+             (= gaps (:gaps prev)))
+    (loop [gs (seq groups) pgs (seq (:groups prev)) changed []]
+      (if gs
+        (when-let [changed (changed-in-group (first gs) (first pgs) changed)]
+          (recur (next gs) (next pgs) changed))
+        changed))))
+
+(defn- page-frame
+  "The frame for page s with its part groups, given the last page's in
+  last (an atom): nil when nothing changed, else {:patch :full}. The patch
+  holds just the parts whose HTML changed, replaced by id; it is nil when the
+  page changed around its parts, or ids repeat, so only the whole page will
+  do. :full builds the whole-page event, which the stream sends in place of a
+  patch when the client missed a frame.
+
+  What is kept between frames is the groups, whose HTML the cache shares, and
+  the text around them, not the page."
+  [last s groups selector mode]
+  (let [prev    @last
+        gaps    (outer-gaps s groups)
+        changed (when (and prev (:distinct? prev))
+                  (changed-parts prev groups gaps))
+        full    #(patch-elements-event s selector mode)]
+    (reset! last {:groups groups :gaps gaps
+                  :distinct? (if changed
+                               true
+                               (let [ids (map first (html/flatten-groups groups))]
+                                 (= (count ids) (count (set ids)))))})
+    (cond
+      (nil? changed) {:patch nil :full full}
+      (seq changed) {:patch (patch-elements-event (apply str changed) nil "outer")
+                     :full  full})))
+
 (defn- sse-response
   "The ring response for an SSE request: a channel body the adapter streams,
   fed by the scheduler. Each frame renders the handler; a frame whose HTML is
-  unchanged is not sent. A render the handler answers with a redirect or an
-  error (a 401 once the session it came from has ended, say) ends the stream,
-  so a page nobody may see any more stops holding the server's memory."
-  [handler request sched]
+  unchanged is not sent, and when the page came from jolt.datastar.html and
+  only some of its parts changed, only those are sent (see page-frame). A
+  render the handler answers with a redirect or an error (a 401 once the
+  session it came from has ended, say) ends the stream, so a page nobody may
+  see any more stops holding the server's memory."
+  [handler request sched patches?]
   (let [q        (query-params request)
         selector (get q "datastar-selector" "body")
         mode     (get q "datastar-mode" "inner")
@@ -320,11 +400,18 @@
                         :jolt.datastar/sse-request true
                         :jolt.datastar/selector selector
                         :jolt.datastar/mode mode)
+        last     (atom nil)
         render   (fn []
-                   (let [{:keys [status body]} (handler request)]
+                   (let [page (volatile! nil)
+                         {:keys [status body]} (binding [html/*page* page]
+                                                 (handler request))
+                         [s parts] @page]
                      (cond
-                       (= 200 status) (patch-elements-event body selector mode)
-                       (and status (>= status 300)) tick/end)))]
+                       (not= 200 status) (when (and status (>= status 300)) tick/end)
+                       (and patches? (some? s) (identical? s body))
+                       (page-frame last s parts selector mode)
+                       :else (do (reset! last nil)
+                                 (patch-elements-event body selector mode)))))]
     {:status  200
      :headers {"Content-Type"  "text/event-stream; charset=utf-8"
                "Cache-Control" "no-store"}
@@ -335,7 +422,8 @@
 (def default-options
   {:tick-ms        15
    :render-threads 2
-   :sse-param      sse-param})
+   :sse-param      sse-param
+   :component-patches true})
 
 (defn scheduler
   "A render loop to share between wrap-datastar and code outside a request:
@@ -383,6 +471,9 @@
                      built from the options above
     :sse-param       query parameter that marks an SSE request (default
                      \"datastar-sse\")
+    :component-patches  send a stream only the components that changed,
+                     replaced by id, when the rest of the page did not
+                     (default true; see jolt.datastar.html)
 
   Signals are parsed into :jolt.datastar/signals; SSE requests (which the page
   opens via init-opts' data-init) get a streaming response that re-renders the
@@ -399,6 +490,6 @@
       (let [request (-> (merge-signals request)
                         (assoc :jolt.datastar/scheduler sched))]
         (if (= "true" (get (query-params request) (:sse-param opts)))
-          (sse-response handler request sched)
+          (sse-response handler request sched (:component-patches opts))
           (binding [html/*cache* cache]
             (handler request)))))))

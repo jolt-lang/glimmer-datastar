@@ -3,7 +3,8 @@
             [clojure.core.async :as async]
             [clojure.string :as str]
             [glimmer.ratom :as ratom]
-            [jolt.datastar.core :as ds]))
+            [jolt.datastar.core :as ds]
+            [jolt.datastar.html :as h]))
 
 (defn- sse-request []
   {:request-method :get :query-string "datastar-sse=true" :headers {} :uri "/"})
@@ -232,4 +233,133 @@
     (is (= 1 (watchers state)))
     (async/<!! (async/io-thread (async/close! ch)))
     (is (= 0 (watchers state)))
+    (ds/stop! sched)))
+
+(defn- board-row [i v] [:tr {:id (str "r" i)} [:td i] [:td v]])
+
+(defn- board-handler [board]
+  (fn [_] {:status 200
+           :body (h/html [:table#board (map-indexed (fn [i v] [board-row i v]) @board)])}))
+
+(deftest a-changed-component-is-patched-alone
+  (let [board   (ratom/atom (vec (range 50)))
+        sched   (ds/scheduler {:tick-ms 5})
+        handler (ds/wrap-datastar (board-handler board) {:scheduler sched})
+        ch      (:body (handler (sse-request)))
+        first-f (take-frame ch)]
+    (is (str/includes? first-f "data: selector body") "the first frame is the whole page")
+    (swap! board assoc 7 :seven)
+    (let [f (take-frame ch)]
+      (is (str/includes? f "<tr id=\"r7\"><td>7</td><td>seven</td></tr>"))
+      (is (not (str/includes? f "r8")) "only the changed row")
+      (is (not (str/includes? f "data: selector")) "patched by id")
+      (is (str/includes? f "data: mode outer")))
+    (testing "two rows in a tick go out in one patch"
+      (swap! board assoc 1 :one 2 :two)
+      (let [f (take-frame ch)]
+        (is (str/includes? f "<td>one</td>"))
+        (is (str/includes? f "<td>two</td>"))
+        (is (not (str/includes? f "data: selector")))))
+    (testing "a row added changes the page around the rows: the whole page"
+      (swap! board conj :new)
+      (let [f (take-frame ch)]
+        (is (str/includes? f "data: selector body"))
+        (is (str/includes? f "<tr id=\"r50\">"))))
+    (async/close! ch)
+    (ds/stop! sched)))
+
+(deftest a-dropped-patch-is-made-up-with-the-whole-page
+  ;; frames slide: a patch the client never took is gone, so the next frame
+  ;; can't be a patch against a page the client hasn't got
+  (let [board   (ratom/atom (vec (range 10)))
+        sched   (ds/scheduler {:tick-ms 5})
+        handler (ds/wrap-datastar (board-handler board) {:scheduler sched})
+        ch      (:body (handler (sse-request)))]
+    (take-frame ch)
+    (swap! board assoc 1 :one)
+    (Thread/sleep 50)                   ; rendered, not taken
+    (swap! board assoc 2 :two)
+    (Thread/sleep 50)
+    (let [f (take-frame ch)]
+      (is (str/includes? f "data: selector body"))
+      (is (str/includes? f "<td>one</td>"))
+      (is (str/includes? f "<td>two</td>")))
+    (async/close! ch)
+    (ds/stop! sched)))
+
+(deftest duplicate-ids-get-the-whole-page
+  (let [state   (ratom/atom 0)
+        twin    (fn [] [:p#same @state])
+        sched   (ds/scheduler {:tick-ms 5})
+        handler (ds/wrap-datastar (fn [_] {:status 200 :body (h/html [:div [twin] [twin]])})
+                                  {:scheduler sched})
+        ch      (:body (handler (sse-request)))]
+    (take-frame ch)
+    (reset! state 1)
+    (is (str/includes? (take-frame ch) "data: selector body"))
+    (async/close! ch)
+    (ds/stop! sched)))
+
+(deftest component-patches-can-be-turned-off
+  (let [board   (ratom/atom (vec (range 5)))
+        sched   (ds/scheduler {:tick-ms 5})
+        handler (ds/wrap-datastar (board-handler board)
+                                  {:scheduler sched :component-patches false})
+        ch      (:body (handler (sse-request)))]
+    (take-frame ch)
+    (swap! board assoc 3 :three)
+    (is (str/includes? (take-frame ch) "data: selector body"))
+    (async/close! ch)
+    (ds/stop! sched)))
+
+(deftest a-page-not-from-html-is-sent-whole
+  (let [state   (ratom/atom 0)
+        sched   (ds/scheduler {:tick-ms 5})
+        handler (ds/wrap-datastar (fn [_] {:status 200 :body (str "<p>" @state "</p>")})
+                                  {:scheduler sched})
+        ch      (:body (handler (sse-request)))]
+    (take-frame ch)
+    (reset! state 1)
+    (is (str/includes? (take-frame ch) "data: selector body"))
+    (async/close! ch)
+    (ds/stop! sched)))
+
+(deftest a-patch-beside-an-unchanged-group
+  (let [title   (ratom/atom "a")
+        note    (ratom/atom "x")
+        board   (ratom/atom (vec (range 5)))
+        header  (fn [] [:h1#title @title])
+        rows    (fn [] [:table (map-indexed (fn [i v] [board-row i v]) @board)])
+        sched   (ds/scheduler {:tick-ms 5})
+        handler (ds/wrap-datastar (fn [_] {:status 200
+                                           :body (h/html [:div [header] [:p @note] [rows]])})
+                                  {:scheduler sched})
+        ch      (:body (handler (sse-request)))]
+    (take-frame ch)
+    (dotimes [_ 3] (swap! board identity) (reset! title (str @title "!")) (take-frame ch))
+    (reset! title "b")
+    (let [f (take-frame ch)]
+      (is (str/includes? f "<h1 id=\"title\">b</h1>"))
+      (is (not (str/includes? f "<tr")) "the rows, served whole from the cache, are left alone")
+      (is (not (str/includes? f "data: selector"))))
+    (testing "text outside any part changed: the whole page"
+      (reset! note "y")
+      (let [f (take-frame ch)]
+        (is (str/includes? f "data: selector body"))
+        (is (str/includes? f "<p>y</p>"))))
+    (async/close! ch)
+    (ds/stop! sched)))
+
+(deftest patches-without-the-cache
+  (let [board   (ratom/atom (vec (range 5)))
+        sched   (ds/scheduler {:tick-ms 5 :cache false})
+        handler (ds/wrap-datastar (board-handler board) {:scheduler sched})
+        ch      (:body (handler (sse-request)))]
+    (take-frame ch)
+    (swap! board assoc 3 :three)
+    (let [f (take-frame ch)]
+      (is (str/includes? f "<td>three</td>"))
+      (is (not (str/includes? f "r2")))
+      (is (not (str/includes? f "data: selector"))))
+    (async/close! ch)
     (ds/stop! sched)))

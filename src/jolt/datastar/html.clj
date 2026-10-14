@@ -18,7 +18,14 @@
   the cache records which ratoms those were and the values it saw, and an
   entry stops matching as soon as one of them changes. On a hit the ratoms are
   read again, so the page rendering it subscribes to them just as though the
-  component had run. Calling (f a b) directly instead renders it uncached."
+  component had run. Calling (f a b) directly instead renders it uncached.
+
+  A component whose root is one element with an id is a part of the page:
+  html-parts returns the page with each part's id, HTML and offset, which is
+  what lets a stream send the parts that changed instead of the whole page.
+  A component without an id is transparent, and its own parts are the page's.
+  Nothing inside an svg or math element is a part, since a patch is parsed as
+  HTML."
   (:require [clojure.data.json :as json]
             [clojure.string :as str]
             [glimmer.ratom :as ratom]
@@ -26,6 +33,20 @@
 
 (def ^:dynamic *cache*
   "The component cache in effect, or nil to render components uncached."
+  nil)
+
+;; The parts of the builder being written, a list of [id html offset], or nil.
+(def ^:dynamic ^:private *parts* nil)
+
+;; True inside svg or math, where a part could not be patched as HTML.
+(def ^:dynamic ^:private *foreign* false)
+
+(def ^:dynamic *page*
+  "Bound to a volatile to be told the last page html rendered, as
+  [html groups]: groups are [offset parts component-html], one per component
+  written that has parts, each part [id its-html offset-in-component-html]. A
+  stream binds it around the handler to find the parts of the body it
+  returns."
   nil)
 
 (deftype Raw [s])
@@ -157,7 +178,9 @@
     (write-attrs! sb id tag-classes attrs)
     (.append sb ">")
     (when-not (contains? void-tags nm)
-      (doseq [c children] (write-node! sb c))
+      (if (or (= "svg" nm) (= "math" nm))
+        (binding [*foreign* true] (doseq [c children] (write-node! sb c)))
+        (doseq [c children] (write-node! sb c)))
       (.append sb "</")
       (.append sb nm)
       (.append sb ">"))))
@@ -178,6 +201,50 @@
           false))
       true)))
 
+(defn- root-id
+  "The id of node when it is one element with an id, else nil."
+  [node]
+  (when (and (vector? node) (keyword? (first node)))
+    (let [attrs (second node)]
+      (if (and (map? attrs) (contains? attrs :id))
+        (some-> (:id attrs) as-str)
+        (second (parse-tag (first node)))))))
+
+;; Parts are kept in groups, [offset parts html], one per component written:
+;; the component's HTML, and its parts with offsets into that HTML. A cached
+;; component brings its parts as one group, the vector stored with it, rather
+;; than a new vector per part on every hit, and a group that is the identical
+;; vector a page had last time needs no further look.
+
+(defn flatten-groups
+  "Part groups, as *page* is given them, as one vector of [id html offset]."
+  [groups]
+  (into [] (mapcat (fn [[off parts]]
+                     (map (fn [[id h start]] [id h (+ off start)]) parts)))
+        groups))
+
+(defn- emit!
+  "Append html, and its parts as a group of the builder's."
+  [^StringBuilder sb ^String html parts]
+  (let [off (.length sb)]
+    (.append sb html)
+    (when-let [^java.util.ArrayList ps *parts*]
+      (when (and (seq parts) (not *foreign*))
+        (.add ps [off parts html])))))
+
+(defn- render-component
+  "Render form into {:html :parts}, its parts relative to its own HTML: the
+  component itself when it has an id, else the parts within."
+  [form]
+  (let [inner (StringBuilder.)
+        ps    (java.util.ArrayList.)
+        node  (call-component form)]
+    (binding [*parts* ps *foreign* false]
+      (write-node! inner node))
+    (let [html (.toString inner)]
+      {:html  html
+       :parts (if-let [id (root-id node)] [[id html 0]] (flatten-groups ps))})))
+
 (defn- write-component! [^StringBuilder sb form]
   (if-let [c *cache*]
     (let [e (cache/lookup c form)]
@@ -186,19 +253,30 @@
             ;; re-read the cells: subscribes this render (and any capture
             ;; around it, for an enclosing cached component) to them
             (run! ratom/deref (:cells e))
-            (.append sb ^String (:html e)))
+            (emit! sb (:html e) (:parts e)))
         ;; rendered into a builder of its own: cutting it out of the outer
         ;; one with substring would make jolt's StringBuilder (a rope) flatten
         ;; everything rendered so far
-        (let [inner (StringBuilder.)
-              [_ cells] (ratom/capture #(write-node! inner (call-component form)))
-              html (.toString inner)]
-          (.append sb html)
+        (let [[r cells] (ratom/capture #(render-component form))]
+          (emit! sb (:html r) (:parts r))
           (cache/record! c (if e :stale :misses))
-          (cache/admit! c form {:html  html
-                                :cells cells
-                                :vals  (mapv ratom/-value cells)}))))
-    (write-node! sb (call-component form))))
+          (cache/admit! c form (assoc r
+                                      :cells cells
+                                      :vals  (mapv ratom/-value cells))))))
+    (let [node (call-component form)]
+      (if-let [id (root-id node)]
+        (let [inner (StringBuilder.)
+              ^java.util.ArrayList ps *parts*
+              n (when ps (.size ps))]
+          (write-node! inner node)
+          ;; parts within it are its own, and their offsets are in inner:
+          ;; drop them (cheaper than a binding, which costs every component)
+          (when ps
+            (while (> (.size ps) n) (.remove ps (int (dec (.size ps))))))
+          (let [html (.toString inner)]
+            (emit! sb html [[id html 0]])))
+        ;; no id: write in place, and its parts are the builder's own
+        (write-node! sb node)))))
 
 (defn- write-node! [^StringBuilder sb node]
   (cond
@@ -221,9 +299,26 @@
 ;; piece and joins once at toString, so there is no buffer growth for reuse to
 ;; save (bench/render.clj).
 
+(defn- render-page
+  "[html groups] for hiccup nodes, also given to *page* when it is bound."
+  [nodes]
+  (let [sb (StringBuilder.)
+        ps (java.util.ArrayList.)]
+    (binding [*parts* ps *foreign* false]
+      (doseq [n nodes] (write-node! sb n)))
+    (let [r [(.toString sb) (vec ps)]]
+      (when-let [p *page*] (vreset! p r))
+      r)))
+
+(defn html-parts
+  "Render hiccup nodes to [html parts]: the HTML string, and for each
+  component in it whose root is an element with an id, [id its-html offset],
+  in page order."
+  [& nodes]
+  (let [[s groups] (render-page nodes)]
+    [s (flatten-groups groups)]))
+
 (defn html
   "Render hiccup nodes to an HTML string."
   [& nodes]
-  (let [sb (StringBuilder.)]
-    (doseq [n nodes] (write-node! sb n))
-    (.toString sb)))
+  (first (render-page nodes)))

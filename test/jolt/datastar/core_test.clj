@@ -47,7 +47,11 @@
     (is (str/includes? e "data: mode inner"))
     (is (str/includes? e "data: namespace html"))
     (is (str/includes? e "data: elements <p>hi</p>"))
-    (is (str/includes? e "data: useViewTransition false"))))
+    (is (str/includes? e "data: useViewTransition false")))
+  (testing "without a selector, elements are matched by id"
+    (let [e (ds/patch-elements-event "<p id=\"a\">hi</p>" nil "outer")]
+      (is (not (str/includes? e "data: selector")))
+      (is (str/includes? e "data: mode outer")))))
 
 (deftest patch-signals-format
   (let [r (ds/patch-signals {:foo/bar 1})]

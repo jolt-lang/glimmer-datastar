@@ -68,7 +68,7 @@
                             (ratom/capture render))
             cells (set cells)
             [old _] (swap-vals! watching (constantly cells))
-            h (if frame (hash frame) @prev-hash)]
+            h (if (string? frame) (hash frame) @prev-hash)]
         ;; a cell an earlier render read and this one didn't can't change
         ;; this frame any more
         (doseq [c old :when (not (contains? cells c))]
@@ -78,6 +78,15 @@
           ;; closed while this rendered: release! may have run before this
           ;; render subscribed, so let go of what it subscribed to
           @closed? (release! conn)
+          ;; a patch is only good against the frame before it: if that one
+          ;; is still waiting it is dropped, and the whole page goes instead
+          (map? frame) (let [stale (async/poll! ch)
+                             out (if (and (:patch frame) (nil? stale))
+                                   (:patch frame)
+                                   ((:full frame)))]
+                         (reset! prev-hash nil)
+                         (when-not (async/put! ch out)
+                           (release! conn)))
           (not= h @prev-hash) (do
                                 ;; slide by hand: a frame the client hasn't
                                 ;; taken yet is stale now. jolt treats a
@@ -208,7 +217,8 @@
 
 (defn connect!
   "Open a stream: render (a no-argument fn returning the frame string, nil to
-  send nothing, or `end` to end the stream) runs on the loop whenever a ratom
+  send nothing, `end` to end the stream, or {:patch p :full f}: send the
+  string p, or (f) if p is nil or the frame before it was never taken) runs on the loop whenever a ratom
   it read changes. Returns the channel the frames go out on; closing it (the
   client going away) ends the stream and releases everything it watched."
   [sched render]

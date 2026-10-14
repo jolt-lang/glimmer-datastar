@@ -36,6 +36,16 @@ with batches and aggregates](https://andersmurphy.com/2026/09/29/faster-streamin
 - **Cached components.** Render with `jolt.datastar.html` and a vector headed
   by a function, `[row item]`, is a component whose HTML is cached by function
   and arguments, and shared by every connection showing it.
+- **Patches.** A component whose root element has an id, `[:tr {:id ...}]`,
+  is a part of the page. When only parts changed since the last frame, the
+  stream sends just those, and Datastar swaps each in by its id; one changed
+  row of a 300-row board is a few hundred bytes rather than the whole board.
+  When the page changed around its parts (a row added, text outside every
+  part edited, an id repeated) the whole page goes as before, and so it does
+  after a client missed a frame. This is the delta half of incremental view
+  maintenance (DBSP's `D`): the page is still rendered whole, but only its
+  change goes out. Ids have to be unique in the document. Nothing inside an
+  `svg` or `math` element is a part.
 - **Streaming compression.** Each frame is a whole fragment, which is cheap on
   the wire when the stream is compressed with a window carried across frames.
   `ring-chez.middleware.gzip/wrap-gzip` (ring-chez-adapter v0.7.14+) does
@@ -138,6 +148,8 @@ don't evict ones rendered every frame, and evicted by generation within
   - `:scheduler`: a scheduler from `scheduler` to use instead of a new one.
   - `:sse-param` (default `"datastar-sse"`): the query parameter that marks an
     SSE request.
+  - `:component-patches` (default true): send only the changed parts of a
+    page, see Patches above. `false` sends every frame whole.
 - `scheduler`, `stop!`: make (and stop) a render loop to share between
   `wrap-datastar` and code outside requests.
 - `tx!`: queue a write for the start of the next tick; takes the request or a
@@ -145,7 +157,8 @@ don't evict ones rendered every frame, and evicted by generation within
 - `cache-stats`: the component cache's counters.
 - `init-opts`: attribute map for the datastar root element. Takes `:signals`,
   `:anti-forgery-token`, and `:selector`.
-- `patch-elements-event`: builds a `datastar-patch-elements` SSE event.
+- `patch-elements-event`: builds a `datastar-patch-elements` SSE event. A nil
+  selector with mode `outer` replaces elements by their ids.
 - `patch-signals`: a ring response that patches the client's signals.
 - `signal-name` and `signals-json`: convert keywords and signal maps to the wire
   format. `:foo/bar` is `foo_bar`. A dotted namespace is a path on the client,

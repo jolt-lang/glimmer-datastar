@@ -219,3 +219,17 @@
     (is (= [nil ch] (async/alts!! [ch (async/timeout 2000)])) "the channel closes")
     (is (= 0 (watchers signed-in)))
     (ds/stop! sched)))
+
+(deftest a-stream-closed-from-a-fiber-lets-go-too
+  ;; the fiber server closes the channel from a fiber, holding the channel's
+  ;; lock, where blocking is refused: the release must not block
+  (let [state   (ratom/atom 0)
+        sched   (ds/scheduler {:tick-ms 5})
+        handler (ds/wrap-datastar (fn [_] {:status 200 :body (str @state)})
+                                  {:scheduler sched})
+        ch      (:body (handler (sse-request)))]
+    (take-frame ch)
+    (is (= 1 (watchers state)))
+    (async/<!! (async/io-thread (async/close! ch)))
+    (is (= 0 (watchers state)))
+    (ds/stop! sched)))

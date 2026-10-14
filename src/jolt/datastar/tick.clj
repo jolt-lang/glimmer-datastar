@@ -214,15 +214,18 @@
   [sched render]
   (ensure-started! sched)
   (let [closed? (atom false)
-        conn-p  (promise)
+        ;; an atom, not a promise: the server closes the channel holding its
+        ;; lock, from a fiber with the fiber server, and a fiber holding a
+        ;; lock may not block, which a promise's deref can
+        conn-ref (atom nil)
         watcher (fn watcher [cell]
                   (if @closed?
                     (ratom/unwatch! cell watcher)
-                    (mark-dirty! sched @conn-p)))
+                    (mark-dirty! sched @conn-ref)))
         ;; the server closes the channel when the client goes away, which is
         ;; the one moment the connection must hear of: a render may never
         ;; again try to send it anything
-        ch      (async/chan (async/sliding-buffer 1) (on-close #(release! @conn-p)))
+        ch      (async/chan (async/sliding-buffer 1) (on-close #(release! @conn-ref)))
         conn    {:id        (gensym "conn")
                  :ch        ch
                  :render    render
@@ -230,7 +233,7 @@
                  :prev-hash (atom nil)
                  :watcher   watcher
                  :watching  (atom #{})}]
-    (deliver conn-p conn)
+    (reset! conn-ref conn)
     ;; the first frame goes out on the next tick
     (mark-dirty! sched conn)
     ch))

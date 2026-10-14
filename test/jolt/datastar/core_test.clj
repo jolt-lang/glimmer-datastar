@@ -145,6 +145,9 @@
     (is (= "tok" (get-in req [:headers "x-csrf-token"])))))
 
 (defn -main [& _]
-  (let [{:keys [fail error] :as result} (run-tests 'jolt.datastar.core-test)]
+  (require 'jolt.datastar.html-test 'jolt.datastar.tick-test)
+  (let [{:keys [fail error] :as result} (run-tests 'jolt.datastar.core-test
+                                                   'jolt.datastar.html-test
+                                                   'jolt.datastar.tick-test)]
     (when (pos? (+ fail error))
       (throw (ex-info "datastar tests failed" result)))))

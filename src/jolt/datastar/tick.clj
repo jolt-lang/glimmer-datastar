@@ -18,7 +18,13 @@
   A tick's renders are spread over :render-threads workers. Each connection's
   frames go out through a sliding buffer of one, so a client that cannot keep
   up is sent the newest frame and skips the ones in between; nothing waits on
-  it."
+  it.
+
+  A connection holds nothing once its stream ends. Each render records the
+  cells it read, and the connection watches exactly those; when the channel
+  closes (the client went away and the server closed it, or a render ended
+  the stream) it stops watching all of them, so nothing reaches it and it is
+  garbage."
   (:require [clojure.core.async :as async]
             [glimmer.ratom :as ratom]
             [jolt.datastar.cache :as cache]
@@ -40,19 +46,47 @@
       (doseq [[thunk p] batch]
         (deliver p (try (thunk) (catch Throwable t t)))))))
 
+(def end
+  "What a render returns to end its stream: the channel is closed and the
+  connection lets go of every cell it watched."
+  ::end)
+
+(defn- release!
+  "Stop conn rendering and unwatch every cell it watches."
+  [{:keys [closed? watching watcher]}]
+  (reset! closed? true)
+  (let [[cells _] (swap-vals! watching (constantly #{}))]
+    (run! #(ratom/unwatch! % watcher) cells)))
+
 (defn- render-conn!
   "Render one connection and send the frame if the HTML changed."
-  [{:keys [cache]} {:keys [render closed? prev-hash ch watcher]}]
+  [{:keys [cache]} {:keys [render closed? prev-hash ch watcher watching] :as conn}]
   (when-not @closed?
     (try
-      (let [frame (binding [ratom/*current-watcher* watcher
-                            html/*cache* cache]
-                    (render))
+      (let [[frame cells] (binding [ratom/*current-watcher* watcher
+                                    html/*cache* cache]
+                            (ratom/capture render))
+            cells (set cells)
+            [old _] (swap-vals! watching (constantly cells))
             h (if frame (hash frame) @prev-hash)]
-        (when (not= h @prev-hash)
-          (if (async/put! ch frame)
-            (reset! prev-hash h)
-            (reset! closed? true))))
+        ;; a cell an earlier render read and this one didn't can't change
+        ;; this frame any more
+        (doseq [c old :when (not (contains? cells c))]
+          (ratom/unwatch! c watcher))
+        (cond
+          (identical? end frame) (async/close! ch)
+          ;; closed while this rendered: release! may have run before this
+          ;; render subscribed, so let go of what it subscribed to
+          @closed? (release! conn)
+          (not= h @prev-hash) (do
+                                ;; slide by hand: a frame the client hasn't
+                                ;; taken yet is stale now. jolt treats a
+                                ;; sliding buffer with a transducer as a fixed
+                                ;; one, so put! would queue behind it
+                                (async/poll! ch)
+                                (if (async/put! ch frame)
+                                  (reset! prev-hash h)
+                                  (release! conn)))))
       (catch Throwable t
         (println "jolt.datastar: render failed:" (ex-message t))))))
 
@@ -162,27 +196,40 @@
     (wake! sched)
     p))
 
+(defn- on-close
+  "A transducer that passes values through and calls f when its channel
+  closes."
+  [f]
+  (fn [rf]
+    (fn
+      ([] (rf))
+      ([acc] (f) (rf acc))
+      ([acc x] (rf acc x)))))
+
 (defn connect!
-  "Open a stream: render (a no-argument fn returning the frame string, or nil
-  to send nothing) runs on the loop whenever a ratom it read changes. Returns
-  the channel the frames go out on; closing it (the client going away) ends
-  the stream."
+  "Open a stream: render (a no-argument fn returning the frame string, nil to
+  send nothing, or `end` to end the stream) runs on the loop whenever a ratom
+  it read changes. Returns the channel the frames go out on; closing it (the
+  client going away) ends the stream and releases everything it watched."
   [sched render]
   (ensure-started! sched)
-  (let [ch      (async/chan (async/sliding-buffer 1))
-        closed? (atom false)
+  (let [closed? (atom false)
         conn-p  (promise)
         watcher (fn watcher [cell]
                   (if @closed?
-                    ;; the client is gone: let go of the cell that fired
                     (ratom/unwatch! cell watcher)
                     (mark-dirty! sched @conn-p)))
+        ;; the server closes the channel when the client goes away, which is
+        ;; the one moment the connection must hear of: a render may never
+        ;; again try to send it anything
+        ch      (async/chan (async/sliding-buffer 1) (on-close #(release! @conn-p)))
         conn    {:id        (gensym "conn")
                  :ch        ch
                  :render    render
                  :closed?   closed?
                  :prev-hash (atom nil)
-                 :watcher   watcher}]
+                 :watcher   watcher
+                 :watching  (atom #{})}]
     (deliver conn-p conn)
     ;; the first frame goes out on the next tick
     (mark-dirty! sched conn)

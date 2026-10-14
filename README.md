@@ -24,6 +24,12 @@ with batches and aggregates](https://andersmurphy.com/2026/09/29/faster-streamin
 - **Frame dropping.** Each connection's frames go out through a sliding buffer
   of one, so a client that can't keep up gets the newest frame and skips the
   rest. Nothing waits on a slow client.
+- **Nothing kept for a closed page.** A connection watches exactly the ratoms
+  its last render read. When the client goes away the server closes the
+  stream's channel, and the connection unwatches all of them at once, so it is
+  garbage even if none of them ever changes again. A render the handler
+  answers with a redirect or an error, such as a 401 once the session has
+  ended, ends the stream the same way.
 - **Batched writes (opt-in).** `tx!` queues a thunk to run at the start of the
   next tick, before anything renders, so writes and renders take turns and no
   render sees half an update. A `:batch-fn` gets each tick's thunks together.

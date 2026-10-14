@@ -309,7 +309,9 @@
 (defn- sse-response
   "The ring response for an SSE request: a channel body the adapter streams,
   fed by the scheduler. Each frame renders the handler; a frame whose HTML is
-  unchanged is not sent."
+  unchanged is not sent. A render the handler answers with a redirect or an
+  error (a 401 once the session it came from has ended, say) ends the stream,
+  so a page nobody may see any more stops holding the server's memory."
   [handler request sched]
   (let [q        (query-params request)
         selector (get q "datastar-selector" "body")
@@ -319,9 +321,10 @@
                         :jolt.datastar/selector selector
                         :jolt.datastar/mode mode)
         render   (fn []
-                   (let [response (handler request)]
-                     (when (= 200 (:status response))
-                       (patch-elements-event (:body response) selector mode))))]
+                   (let [{:keys [status body]} (handler request)]
+                     (cond
+                       (= 200 status) (patch-elements-event body selector mode)
+                       (and status (>= status 300)) tick/end)))]
     {:status  200
      :headers {"Content-Type"  "text/event-stream; charset=utf-8"
                "Cache-Control" "no-store"}

@@ -168,3 +168,54 @@
           (str "every stream sees its own header and state " n)))
     (run! async/close! chs)
     (ds/stop! sched)))
+
+(defn- watchers [cell] (count @(:watches cell)))
+
+(deftest a-closed-stream-lets-go-of-its-cells
+  ;; the stream used to hear of the close only from a put! that failed, which
+  ;; never came when no cell it read changed again or its HTML stayed the
+  ;; same, so a closed page stayed on its cells for as long as they lived
+  (let [state   (ratom/atom 0)
+        other   (ratom/atom :x)
+        sched   (ds/scheduler {:tick-ms 5})
+        handler (ds/wrap-datastar (fn [_] {:status 200 :body (str @state @other)})
+                                  {:scheduler sched})
+        ch      (:body (handler (sse-request)))]
+    (take-frame ch)
+    (is (= 1 (watchers state)))
+    (is (= 1 (watchers other)))
+    (async/close! ch)
+    (is (= 0 (watchers state)) "released on close, with nothing changed")
+    (is (= 0 (watchers other)))
+    (ds/stop! sched)))
+
+(deftest a-stream-watches-only-what-it-last-read
+  (let [which   (ratom/atom :a)
+        a       (ratom/atom "a")
+        b       (ratom/atom "b")
+        sched   (ds/scheduler {:tick-ms 5})
+        handler (ds/wrap-datastar (fn [_] {:status 200 :body (str (if (= :a @which) @a @b))})
+                                  {:scheduler sched})
+        ch      (:body (handler (sse-request)))]
+    (take-frame ch)
+    (is (= [1 0] [(watchers a) (watchers b)]))
+    (reset! which :b)
+    (is (str/includes? (take-frame ch) "b"))
+    (is (= [0 1] [(watchers a) (watchers b)]) "a no longer shapes the page")
+    (async/close! ch)
+    (ds/stop! sched)))
+
+(deftest a-refused-render-ends-the-stream
+  ;; a 401 once the session the stream came from has ended, say
+  (let [signed-in (ratom/atom true)
+        sched     (ds/scheduler {:tick-ms 5})
+        handler   (ds/wrap-datastar (fn [_] (if @signed-in
+                                              {:status 200 :body "<p>mine</p>"}
+                                              {:status 401 :body "sign in"}))
+                                    {:scheduler sched})
+        ch        (:body (handler (sse-request)))]
+    (is (str/includes? (take-frame ch) "mine"))
+    (reset! signed-in false)
+    (is (= [nil ch] (async/alts!! [ch (async/timeout 2000)])) "the channel closes")
+    (is (= 0 (watchers signed-in)))
+    (ds/stop! sched)))

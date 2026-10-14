@@ -5,12 +5,14 @@
   self-contained — it parses query strings and bodies itself, so it needs no
   ring middleware stack.
 
-  Server state lives in glimmer.ratom reactive cells (reagent semantics): the
-  SSE loop renders the handler under glimmer.ratom/*current-watcher*, so every
-  ratom dereffed during the render registers as a dependency, and any
-  swap!/reset! on one re-renders the stream. When the rendered HTML actually
-  changed, a `datastar-patch-elements` event is pushed to every open stream —
-  server-side reactivity in the reagent style.
+  Server state lives in glimmer.ratom reactive cells (reagent semantics): each
+  SSE stream renders the handler under glimmer.ratom/*current-watcher*, so
+  every ratom dereffed during the render registers as a dependency, and any
+  swap!/reset! on one marks the stream dirty. Dirty streams re-render together
+  on the next tick (jolt.datastar.tick), once however many writes landed, and
+  when the rendered HTML actually changed a `datastar-patch-elements` event is
+  pushed — server-side reactivity in the reagent style. Components rendered
+  with jolt.datastar.html are cached across streams.
 
         (def state (ratom/atom {:greetings []}))
         (def handler (datastar/wrap-datastar app-handler {:rate-limit-ms 15}))
@@ -21,11 +23,11 @@
   formatting go through jolt.scheme bytevector/utf8 primitives."
   (:require
    [jolt.time] ; java.time shim — must load before clojure.data.json
-   [glimmer.ratom :as ratom]
-   [clojure.core.async :as async]
    [clojure.data.json :as json]
    [clojure.string :as str]
    [clojure.walk :as walk]
+   [jolt.datastar.html :as html]
+   [jolt.datastar.tick :as tick]
    [jolt.scheme :as scheme]))
 
 ;; --- percent-decoding / hex (Chez bytevector + utf8 primitives) -------------
@@ -304,78 +306,96 @@
         "data: useViewTransition false\n"
         "\n")))
 
-(defn- sse-body
-  "A channel streaming SSE patch events for one connection. Each pass renders
-  the handler under glimmer's *current-watcher*, so ratoms dereffed during the
-  render subscribe this connection; the loop parks until one of them changes,
-  re-renders, and pushes an event when the HTML changed. Closing the client
-  connection ends the loop (and, on the next state change, unregisters its
-  stale watcher)."
-  [handler request {:keys [rate-limit-ms selector mode]}]
-  (let [ch    (async/chan)
-        dirty (async/chan 1)]
-    (letfn [(tick [cell]
-              ;; put! returns false once dirty is closed (client gone);
-              ;; unregister from the cell that fired us
-              (when-not (async/put! dirty true)
-                (ratom/unwatch! cell tick)))]
-      (async/go
-        (try
-          (loop [prev-hash nil]
-            (let [response (binding [ratom/*current-watcher* tick]
-                             (handler request))
-                  body     (when (= 200 (:status response)) (:body response))
-                  h        (if body (hash body) prev-hash)]
-              (cond
-                (and (not= h prev-hash)
-                     (not (async/>! ch (patch-elements-event body selector mode))))
-                nil ; client went away
-
-                (not= h prev-hash)
-                (do (async/<! (async/timeout rate-limit-ms))
-                    (when (async/<! dirty) (recur h)))
-
-                :else
-                (when (async/<! dirty) (recur h)))))
-          (finally (async/close! dirty)))))
-    ch))
-
 (defn- sse-response
-  "The ring response for an SSE request: a channel body the adapter streams."
-  [handler request {:keys [rate-limit-ms]}]
-  (let [request (assoc request
-                       :jolt.datastar/sse-request true
-                       :jolt.datastar/selector (get (query-params request)
-                                                    "datastar-selector" "body")
-                       :jolt.datastar/mode (get (query-params request)
-                                                "datastar-mode" "inner"))]
+  "The ring response for an SSE request: a channel body the adapter streams,
+  fed by the scheduler. Each frame renders the handler; a frame whose HTML is
+  unchanged is not sent."
+  [handler request sched]
+  (let [q        (query-params request)
+        selector (get q "datastar-selector" "body")
+        mode     (get q "datastar-mode" "inner")
+        request  (assoc request
+                        :jolt.datastar/sse-request true
+                        :jolt.datastar/selector selector
+                        :jolt.datastar/mode mode)
+        render   (fn []
+                   (let [response (handler request)]
+                     (when (= 200 (:status response))
+                       (patch-elements-event (:body response) selector mode))))]
     {:status  200
      :headers {"Content-Type"  "text/event-stream; charset=utf-8"
                "Cache-Control" "no-store"}
-     :body    (sse-body handler request {:rate-limit-ms rate-limit-ms
-                                         :selector (:jolt.datastar/selector request)
-                                         :mode     (:jolt.datastar/mode request)})}))
+     :body    (tick/connect! sched render)}))
 
 ;; --- the entry point --------------------------------------------------------
 
 (def default-options
-  {:rate-limit-ms 15
-   :sse-param     sse-param})
+  {:tick-ms        15
+   :render-threads 1
+   :sse-param      sse-param})
+
+(defn scheduler
+  "A render loop to share between wrap-datastar and code outside a request:
+  pass it as :scheduler and call (tx! sched thunk) from anywhere. Takes the
+  same :tick-ms, :render-threads, :batch-fn and :cache options as
+  wrap-datastar."
+  ([] (scheduler {}))
+  ([opts] (tick/scheduler (merge default-options opts))))
+
+(defn stop!
+  "Stop a scheduler's render loop and workers."
+  [sched]
+  (tick/stop! sched))
+
+(defn tx!
+  "Queue thunk to run at the start of the next render tick, before anything
+  renders, and return a promise of its result (or of the exception it threw).
+  The first argument is the request (wrap-datastar puts its scheduler on it)
+  or a scheduler.
+
+  This is opt-in. A plain swap! still works and still re-renders on the next
+  tick; what tx! adds is that writes and renders take turns, so a render never
+  sees half of an update made of several swaps, and a :batch-fn can apply a
+  tick's writes together."
+  [request-or-sched thunk]
+  (tick/tx! (or (:jolt.datastar/scheduler request-or-sched) request-or-sched) thunk))
+
+(defn cache-stats
+  "The component cache's counters (hits, misses, stale, admitted, entries) for
+  the request's (or a) scheduler, or nil without a cache."
+  [request-or-sched]
+  (tick/stats (or (:jolt.datastar/scheduler request-or-sched) request-or-sched)))
 
 (defn wrap-datastar
   "The datastar middleware entry point. Wrap the app handler with it, passing
   a params map of options:
-    :rate-limit-ms  minimum ms between SSE re-renders (default 15)
-    :sse-param      query parameter that marks an SSE request (default
-                    \"datastar-sse\")
+    :tick-ms         minimum ms between renders of the open streams (default
+                     15; :rate-limit-ms is read as an older name for it)
+    :render-threads  threads a tick's renders are spread over (default 1)
+    :batch-fn        (fn [thunks]) applying each tick's tx! thunks (default:
+                     each in order)
+    :cache           component cache options, or false to render components
+                     uncached (see jolt.datastar.cache/new-cache)
+    :scheduler       a scheduler made with `scheduler`, instead of a new one
+                     built from the options above
+    :sse-param       query parameter that marks an SSE request (default
+                     \"datastar-sse\")
 
   Signals are parsed into :jolt.datastar/signals; SSE requests (which the page
   opens via init-opts' data-init) get a streaming response that re-renders the
-  handler whenever a glimmer ratom it derefs changes."
+  handler on the next tick after a glimmer ratom it derefs changes. Every
+  request carries the scheduler as :jolt.datastar/scheduler (see tx!), and
+  renders with the component cache bound (see jolt.datastar.html)."
   [handler opts]
-  (let [opts (merge default-options opts)]
+  (let [opts  (cond-> (merge default-options opts)
+                (and (:rate-limit-ms opts) (not (:tick-ms opts)))
+                (assoc :tick-ms (:rate-limit-ms opts)))
+        sched (or (:scheduler opts) (tick/scheduler opts))
+        cache (:cache sched)]
     (fn [request]
-      (let [request (merge-signals request)]
+      (let [request (-> (merge-signals request)
+                        (assoc :jolt.datastar/scheduler sched))]
         (if (= "true" (get (query-params request) (:sse-param opts)))
-          (sse-response handler request opts)
-          (handler request))))))
+          (sse-response handler request sched)
+          (binding [html/*cache* cache]
+            (handler request)))))))

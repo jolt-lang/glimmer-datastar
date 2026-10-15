@@ -6,9 +6,9 @@
         ;; data.json reads java.time.format.DateTimeFormatter/ISO_INSTANT at
         ;; namespace-load time, and java.time.* is this library (jolt-lang/time)
         ;; rather than core, so jolt.time must load first — see the ns form.
-        jolt-lang/time
+        io.github.jolt-lang/time
         {:git/url "https://github.com/jolt-lang/time.git"
-         :git/sha "33c5e9831c046cfcbe68bc0c9c33e92568eaebb1"}
+         :git/sha "2c58d9c709a25d80608757c3026f4c656a994ef1"}
         ;; reagent-style reactive cells: the SSE live-render loop subscribes to
         ;; every ratom the page render derefs and re-renders when it changes.
         jolt-lang/glimmer

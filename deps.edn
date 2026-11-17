@@ -8,7 +8,7 @@
         ;; rather than core, so jolt.time must load first — see the ns form.
         io.github.jolt-lang/time
         {:git/url "https://github.com/jolt-lang/time.git"
-         :git/sha "a6690ca1ae69585681965823959eef33707239ce"}
+         :git/sha "8daa9dd95d87a57393c17d83a8f9a1e37b966bbe"}
         ;; reagent-style reactive cells: the SSE live-render loop subscribes to
         ;; every ratom the page render derefs and re-renders when it changes.
         jolt-lang/glimmer
